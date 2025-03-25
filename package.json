@@ -1,6 +1,6 @@
 {
   "name": "uwebkoa",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "uWebKoa",
   "author": "fukai <iakuf@163.com>",
   "main": "src/uWebKoa.js",
@@ -15,7 +15,7 @@
     "vitest": "^3.0.9",
     "@vitejs/plugin-node": "^1.0.0"
   },
-   "files": [
+  "files": [
     "src/",
     "README.md",
     "LICENSE"
