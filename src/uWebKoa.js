@@ -96,6 +96,8 @@ class uWebKoa {
      * @returns {Object} 上下文对象
      */
     createContext(res, req) {
+
+
         // 立即从 req 对象提取所有需要的数据，因为 req 对象在异步操作后不能访问
         const url = req.getUrl();
         const method = req.getMethod();
@@ -131,6 +133,8 @@ class uWebKoa {
                 headers: {},
                 body: null,
             },
+            _aborted: false, // 标记请求是否已中止
+            _ended: false, // 标记响应是否已结束
             options: this.options, // 将options传递给上下文对象
 
             // 兼容 Koa 的属性和方法
@@ -217,18 +221,10 @@ class uWebKoa {
                         }
                     });
                     // 处理请求已经中止的情况
-                    if (this.res.aborted) {
+                    if (this._aborted) {
                         this.request.body = {};
                         return resolve();
                     }
-
-                    // 当客户端中断连接时
-                    res.onAborted(() => {
-                        // console.log(`客户端中断了连接，URL: ${this.request.url}`);
-                        res.aborted = true;
-                        resolve();
-                    });
-
                 });
             },
             // 设置响应状态码
@@ -255,7 +251,7 @@ class uWebKoa {
             // 发送响应, 这个函数不能重复执行
             send() {
                 // 如果已经发送过响应，则不再发送, 主要是为了优化 uWebSocket.js
-                if (this.res.ended || this.res.aborted) return this;
+                if (this._ended || this._aborted) return this;
                 // 使用 uWebSockets 的 cork 方法优化写入性能
                 this.res.cork(() => {
                     // 设置状态码
@@ -276,13 +272,14 @@ class uWebKoa {
                     } else {
                         this.res.end();
                     }
+                    this._ended = true; // 标记响应已结束
                 });
                 return this;
             },
             // 发送文件
             async sendFile(filePath) {
                 // 如果已经发送过响应，则不再发送
-                if (this.res.ended || this.res.aborted) return false;
+                if (this._ended || this._aborted) return false;
 
                 try {
                     // 检查文件是否存在
@@ -302,7 +299,7 @@ class uWebKoa {
                         this.status = 404;
                         this.body = '<h1>404 Not Found</h1><p>Invalid path.</p>';
                         this.send(); // 直接在这里发送响应
-                        this.res.ended = true; // 防止 handleRequest 再次执行
+                        this._ended = true; // 防止 handleRequest 再次执行
                         return false;
                     }
                     // console.log(`文件存在: ${fullPath} 文件大小 ${stat.size}`);
@@ -321,7 +318,7 @@ class uWebKoa {
                             this.res.writeHeader('Content-Length', stat.size.toString());
                             this.res.end(fileContent);
                         });
-                        this.res.ended = true; // 这需要手动标记
+                        this._ended = true; // 这需要手动标记
                         return true;
                     }
 
@@ -333,12 +330,9 @@ class uWebKoa {
                     const BUFFER_SIZE = 64 * 1024; // 64KB
                     const buffer = Buffer.alloc(BUFFER_SIZE);
 
-                    // 标记是否已中止
-                    let aborted = false;
-
-                    // 中断处理器
+                    // 中断处理器， 之所以这个地方还注册，是因为需要它来关句柄。
                     this.res.onAborted(() => {
-                        aborted = true;
+                        this._aborted = true;
                         console.log(`客户端中断了文件传输: ${fullPath}`);
                         fsClose(fd).catch(err => console.error('关闭文件失败:', err));
                     });
@@ -358,7 +352,7 @@ class uWebKoa {
                     let totalSent = 0;
 
                     while (position < stat.size) {
-                        if (aborted) break;
+                        if (this._aborted) break; 
 
                         bytesRead = fs.readSync(fd, buffer, 0, BUFFER_SIZE, position);
 
@@ -378,22 +372,22 @@ class uWebKoa {
                     await fsClose(fd);
 
                     // 如果没有中止，结束响应
-                    if (!aborted) {
+                    if (!this._aborted) {
                         this.res.cork(() => {
                             this.res.end();
                         });
-                        if (this.res.ended) {  // <-- 新增保护逻辑
+                        if (this._ended) {  // <-- 新增保护逻辑
                             console.warn('响应已结束，跳过后续操作');
                             return;
                         }
                         // console.log(`文件发送完成: ${fullPath}, 总共发送: ${totalSent} 字节`);
                     }
-                    this.res.ended = true;
+                    this._ended = true;
                     return !aborted;
                 } catch (err) {
                     // console.error(`发送文件错误 (${filePath}):`, err);
                     // 添加连接状态检查
-                    if (this.res.aborted || this.res.ended) {
+                    if (this._aborted || this._ended) {
                         console.log('连接已中断，跳过错误处理');
                         return false;
                     }
@@ -409,7 +403,7 @@ class uWebKoa {
                         this.body = '<h1>500 Internal Server Error</h1><p>Error reading file.</p>';
                     }
                     this.send();
-                    this.res.ended = true;
+                    this._ended = true;
                     return false;
                 }
             },
@@ -449,7 +443,6 @@ class uWebKoa {
         * @returns {uWebKoa} 实例自身，支持链式调用
         */
     serveStatic(urlPrefix, rootDir) {
-        console.log(`tttttttttt`, urlPrefix, rootDir)
         // 安全检查：确保 rootDir 不为空且是有效路径
         if (!rootDir || typeof rootDir !== 'string' || rootDir.trim() === '') {
             throw new Error('静态文件根目录不能为空');
@@ -474,7 +467,7 @@ class uWebKoa {
 
             // 添加请求方法检查（仅处理GET请求）
             if (ctx.request.method === 'GET' && url.startsWith(urlPrefix)) {
-                if (ctx.res.ended) return;
+                if (ctx._ended || ctx._aborted) return;
 
                 // 修正路径拼接逻辑
                 const relativePath = url.slice(urlPrefix.length);
@@ -514,6 +507,12 @@ class uWebKoa {
         // 解析查询参数， 在这里解析查询参数，确保所有中间件都能使用
         const ctx = this.createContext(res, req);
 
+        // 在解析请求体之前绑定中断事件
+        res.onAborted(() => {
+            ctx._aborted = true;  // 统一使用上下文状态
+            console.log('客户端提前中断连接');
+        });
+
         try {
             // 解析请求体
             await ctx.parseBody();
@@ -521,6 +520,8 @@ class uWebKoa {
             // 执行中间件链
             let index = 0;
             const next = async () => {
+                // 每次执行中间件前检查中断状态
+                if (ctx._aborted || ctx._ended) return;
                 if (index >= this.middlewares.length) return;
                 const middleware = this.middlewares[index++];
                 await middleware(ctx, next);
@@ -529,13 +530,11 @@ class uWebKoa {
             await next();
 
             // 发送响应
-            if (!res.ended && !res.aborted) {
-                ctx.send();
-            }
+            ctx.send();
         } catch (err) {
             console.error('Request handling error:', err);
             // 只有在响应尚未发送且连接未中断时才发送错误响应
-            if (!res.aborted && !res.ended) {
+            if (!ctx._aborted && !ctx._ended) {
                 ctx.status = 500;
                 ctx.body = JSON.stringify({ error: 'Internal Server Error' });
                 ctx.send();

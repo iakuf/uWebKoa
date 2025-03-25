@@ -48,9 +48,8 @@ function createMockRes() {
       const buffer = Buffer.from('{"test":"data"}');
       cb(buffer, true);
     }),
-    onAborted: vi.fn((cb) => {
-      // 存储回调以便测试可以触发它
-      this.abortCb = cb;
+    onAborted: vi.fn(function(cb) { // 将箭头函数改为普通函数
+      this.abortCb = cb; // 此时 this 指向 res 对象
     }),
     writeStatus: vi.fn(),
     writeHeader: vi.fn(),
@@ -211,8 +210,10 @@ describe('uWebKoa', () => {
 
     it('应该处理请求中止', async () => {
       const middleware = vi.fn(async (ctx, next) => {
-        // 在中间件执行过程中模拟请求中止
-        mockRes.aborted = true;
+        // 触发中断回调（正确方式）
+        if (ctx.res.abortCb) {
+          ctx.res.abortCb();
+        }
         await next();
       });
 
@@ -230,10 +231,10 @@ describe('uWebKoa', () => {
     it('应该优雅处理请求中途中断', async () => {
       // 模拟一个延迟执行的中间件
       const delayMiddleware = vi.fn(async (ctx, next) => {
-        // 模拟异步操作
-        await new Promise(resolve => setTimeout(resolve, 10));
-        // 模拟请求中断
-        ctx.res.aborted = true;
+        // 触发中断回调（正确方式）
+        if (ctx.res.abortCb) {
+          ctx.res.abortCb();
+        }
         await next();
       });
 
