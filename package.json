@@ -1,0 +1,23 @@
+{
+  "name": "uwebkoa",
+  "version": "1.0.0",
+  "description": "uWebKoa",
+  "author": "fukai <iakuf@163.com>",
+  "main": "src/uWebKoa.js",
+  "type": "module",
+  "scripts": {
+    "test": "vitest"
+  },
+  "dependencies": {
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.51.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.9",
+    "@vitejs/plugin-node": "^1.0.0"
+  },
+   "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ]
+}

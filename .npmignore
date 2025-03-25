@@ -1,0 +1,12 @@
+# 忽略测试相关
+tests/
+examples/
+vite.config.js
+
+# 忽略开发配置
+.gitignore
+.npmignore
+
+# 忽略 IDE 文件
+.idea/
+.vscode/
