@@ -12,7 +12,7 @@
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.51.0"
   },
   "devDependencies": {
-    "vitest": "^3.0.9",
+    "vitest": "3.0.8",
     "@vitejs/plugin-node": "^1.0.0"
   },
   "files": [
