@@ -186,6 +186,7 @@ const io = new Server({
 // Get uWebSocket.js app instance
 const uWebSocketApp = app.getUWebSocketApp();
 io.attachApp(uWebSocketApp);
+app.context.io = io; // Pass socket.io instance to context
 
 app.get('/path/:id', (ctx) => {
   ctx.io.to(id).emit("server_notify_update", {}); 
@@ -244,6 +245,29 @@ app.use(async (ctx) => {
 // Start Server
 app.listen(3000, { cluster: true });
 ```
+## FAQ
+- Why choose uWebKoa over Koa or Express?
+uWebKoa maintains Koa's elegant API while providing significant performance improvements through the uWebSockets.js foundation, making it particularly suitable for high-concurrency scenarios.
+
+- Does it support WebSocket and Socket.io?
+The current version primarily focuses on HTTP services, with native WebSocket and Socket.io support planned for future releases.
+
+- How to access the raw request object?
+You can access uWebSockets.js' native objects through ctx.req and ctx.res. Additionally, app.getUWebSocketApp() retrieves the native uWebSockets.js application instance.
+
+## Contribution
+We welcome issues and pull requests. Please ensure:
+
+- Consistent code style
+- Passing all tests
+- Comprehensive test coverage for new features
+
+For questions or suggestions:
+
+Open an issue on GitHub
+
+1. mail iakuf@163.com with subject line "[uWebKoa] Your Subject"
+2. Please include detailed reproduction steps for bug reports and clear rationale for feature requests.
 
 ## Stress Test
 ```bash
