@@ -192,7 +192,11 @@ class uWebKoa {
 
 
                     res.onData((chunk, isLast) => {
-                        const curChunk = Buffer.from(chunk);
+                        // const curChunk = Buffer.from(chunk);
+                        // buffer = buffer ? Buffer.concat([buffer, curChunk]) : curChunk;
+                        // 当你尝试将新的数据块 curChunk 与之前的 buffer 合并时，如果 curChunk 的底层 ArrayBuffer 已经被分离，就会导致这个错误。
+                        // TypeError: Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer
+                        const curChunk = Buffer.from(new Uint8Array(chunk));
                         buffer = buffer ? Buffer.concat([buffer, curChunk]) : curChunk;
                         if (isLast) {
                             try {

@@ -1,6 +1,6 @@
 {
   "name": "uwebkoa",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "uWebKoa",
   "author": "fukai <iakuf@163.com>",
   "main": "src/uWebKoa.js",
