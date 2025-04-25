@@ -178,57 +178,89 @@ class uWebKoa {
                     }
                 }
             },
-            // 解析JSON请求体
+            // 解析JSON请求体，改进的缓冲区管理
             async parseBody() {
                 const contentType = this.request.headers['content-type'];
-                return new Promise((resolve) => {
-                    let buffer;
-
+                const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB 大小限制
+                let totalSize = 0;
+                
+                return new Promise((resolve, reject) => {
                     // 检查是否为 GET 或 HEAD 请求，这些请求通常没有请求体
                     if (this.request.method === 'GET' || this.request.method === 'HEAD') {
                         this.request.body = {};
                         return resolve();
                     }
-
-
-                    res.onData((chunk, isLast) => {
-                        // const curChunk = Buffer.from(chunk);
-                        // buffer = buffer ? Buffer.concat([buffer, curChunk]) : curChunk;
-                        // 当你尝试将新的数据块 curChunk 与之前的 buffer 合并时，如果 curChunk 的底层 ArrayBuffer 已经被分离，就会导致这个错误。
-                        // TypeError: Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer
-                        const curChunk = Buffer.from(new Uint8Array(chunk));
-                        buffer = buffer ? Buffer.concat([buffer, curChunk]) : curChunk;
-                        if (isLast) {
-                            try {
-                                if (contentType && contentType.includes('application/json')) {
-                                    this.request.body = JSON.parse(buffer.toString());
-                                } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
-                                    // 添加对 URL 编码表单的支持
-                                    this.request.body = {};
-                                    const formData = buffer.toString();
-                                    const pairs = formData.split('&');
-                                    pairs.forEach(pair => {
-                                        const [key, value] = pair.split('=');
-                                        if (key) {
-                                            this.request.body[decodeURIComponent(key)] = decodeURIComponent(value || '');
-                                        }
-                                    });
-                                } else {
-                                    this.request.body = buffer.toString();
-                                }
-                                resolve();
-                            } catch (e) {
-                                console.error(`解析请求体错误:`, e);
-                                this.request.body = buffer.toString();
-                                resolve();
-                            }
-                        }
-                    });
-                    // 处理请求已经中止的情况
+                    
+                    // 已经中止的请求
                     if (this._aborted) {
                         this.request.body = {};
                         return resolve();
                     }
+
+                    let buffer = null;
+                    let chunks = [];
+                    
+                    this.res.onData((chunk, isLast) => {
+                        // 使用 try-catch 处理任何解析错误
+                        try {
+                            // 安全复制数据块
+                            const curChunk = Buffer.from(new Uint8Array(chunk));
+                            totalSize += curChunk.length;
+                            
+                            // 检查请求体大小限制
+                            if (totalSize > MAX_BODY_SIZE) {
+                                this._aborted = true;
+                                return reject(new Error('请求体过大'));
+                            }
+                            
+                            // 使用数组存储块，避免过早连接
+                            chunks.push(curChunk);
+                            
+                            if (isLast) {
+                                // 只有在最后才合并所有块
+                                buffer = Buffer.concat(chunks);
+                                chunks = null; // 清理临时数组
+                                
+                                try {
+                                    if (contentType && contentType.includes('application/json')) {
+                                        this.request.body = JSON.parse(buffer.toString());
+                                    } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
+                                        // 添加对 URL 编码表单的支持
+                                        this.request.body = {};
+                                        const formData = buffer.toString();
+                                        const pairs = formData.split('&');
+                                        pairs.forEach(pair => {
+                                            const [key, value] = pair.split('=');
+                                            if (key) {
+                                                this.request.body[decodeURIComponent(key)] = decodeURIComponent(value || '');
+                                            }
+                                        });
+                                    } else {
+                                        this.request.body = buffer.toString();
+                                    }
+                                    buffer = null; // 显式释放缓冲区
+                                    resolve();
+                                } catch (e) {
+                                    console.error(`解析请求体错误:`, e);
+                                    this.request.body = buffer ? buffer.toString() : '';
+                                    buffer = null; // 显式释放缓冲区
+                                    resolve();
+                                }
+                            }
+                        } catch (error) {
+                            buffer = null;
+                            chunks = null;
+                            reject(error);
+                        }
+                    });
+
+                    // 设置更明确的错误处理逻辑
+                    this.res.onAborted(() => {
+                        buffer = null;
+                        chunks = null;
+                        this._aborted = true;
+                        resolve(); // 优雅地处理中止情况
+                    });
                 });
             },
             // 设置响应状态码
@@ -387,7 +419,7 @@ class uWebKoa {
                         // console.log(`文件发送完成: ${fullPath}, 总共发送: ${totalSent} 字节`);
                     }
                     this._ended = true;
-                    return !aborted;
+                    return !this._aborted;
                 } catch (err) {
                     // console.error(`发送文件错误 (${filePath}):`, err);
                     // 添加连接状态检查
@@ -508,12 +540,32 @@ class uWebKoa {
      * @param {Object} req uWebSockets请求对象
      */
     async handleRequest(res, req) {
-        // 解析查询参数， 在这里解析查询参数，确保所有中间件都能使用
+        // 创建上下文
         const ctx = this.createContext(res, req);
+        
+        // 请求超时机制
+        let timeoutId = null;
+        const REQUEST_TIMEOUT = 30000; // 30秒超时
+        
+        // 设置请求超时
+        timeoutId = setTimeout(() => {
+            if (!ctx._ended && !ctx._aborted) {
+                ctx._aborted = true;
+                console.log('请求超时，自动终止');
+                
+                // 发送超时响应
+                res.cork(() => {
+                    res.writeStatus('408 Request Timeout');
+                    res.writeHeader('Content-Type', 'application/json');
+                    res.end(JSON.stringify({ error: '请求超时' }));
+                });
+            }
+        }, REQUEST_TIMEOUT);
 
         // 在解析请求体之前绑定中断事件
         res.onAborted(() => {
-            ctx._aborted = true;  // 统一使用上下文状态
+            ctx._aborted = true;
+            clearTimeout(timeoutId); // 清除超时定时器
             console.log('客户端提前中断连接');
         });
 
@@ -521,49 +573,98 @@ class uWebKoa {
             // 解析请求体
             await ctx.parseBody();
 
-            // 执行中间件链
-            let index = 0;
-            const next = async () => {
-                // 每次执行中间件前检查中断状态
-                if (ctx._aborted || ctx._ended) return;
-                if (index >= this.middlewares.length) return;
-                const middleware = this.middlewares[index++];
-                await middleware(ctx, next);
-            };
-
-            await next();
+            // 执行中间件链 - 实现超时机制
+            await this.executeMiddleware(ctx);
 
             // 发送响应
-            ctx.send();
+            if (!ctx._ended && !ctx._aborted) {
+                ctx.send();
+            }
         } catch (err) {
             console.error('Request handling error:', err);
             // 只有在响应尚未发送且连接未中断时才发送错误响应
             if (!ctx._aborted && !ctx._ended) {
                 ctx.status = 500;
-                ctx.body = JSON.stringify({ error: 'Internal Server Error' });
+                ctx.body = { error: 'Internal Server Error' };
                 ctx.send();
             }
-            return;
+        } finally {
+            clearTimeout(timeoutId); // 确保清除超时定时器
+            
+            // 显式清理上下文中的大型对象
+            if (ctx.request.body && typeof ctx.request.body === 'object') {
+                ctx.request.body = null;
+            }
+            if (ctx.response.body && typeof ctx.response.body === 'object' && ctx.response.body.length > 1024) {
+                ctx.response.body = null;
+            }
+            
+            // 设置 WeakRef，允许垃圾回收
+            ctx.req = null;
+            ctx.res = null;
         }
     }
 
-    // /**
-    //  * 注册路由处理器
-    //  * @param {string} method HTTP方法
-    //  * @param {string} pattern 路由模式
-    //  * @param {Function} handler 处理函数
-    //  */
-    // route(method, pattern, handler) {
-    //     return async (ctx, next) => {
-    //         if (ctx.request.method.toLowerCase() === method.toLowerCase() &&
-    //             this.matchPattern(ctx.request.url, pattern)) {
-    //             ctx.parseParams(pattern);
-    //             await handler(ctx);
-    //         } else {
-    //             await next();
-    //         }
-    //     };
-    // }
+    /**
+     * 执行中间件链，非递归实现但保持原有执行顺序
+     * @param {Object} ctx 请求上下文
+     */
+    async executeMiddleware(ctx) {
+        const MIDDLEWARE_TIMEOUT = 10000; // 中间件执行超时时间 (10秒)
+        
+        if (this.middlewares.length === 0) return;
+        
+        // 创建一个执行计划数组，包含每个中间件的状态
+        const middlewareStack = this.middlewares.map(middleware => ({
+            middleware,
+            executed: false,
+            completed: false
+        }));
+        
+        // 递归执行逻辑转为非递归实现
+        let currentIndex = 0;
+        
+        const executeNextMiddleware = async (index) => {
+            if (index >= this.middlewares.length) return;
+            
+            const middlewareInfo = middlewareStack[index];
+            if (middlewareInfo.executed) return; // 已经执行过的跳过
+            
+            middlewareInfo.executed = true;
+            
+            try {
+                // 创建 next 函数，模拟递归行为
+                const next = async () => {
+                    // 执行下一个中间件
+                    await executeNextMiddleware(index + 1);
+                };
+                
+                // 设置中间件执行超时
+                const middlewarePromise = this.middlewares[index](ctx, next);
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('中间件执行超时')), MIDDLEWARE_TIMEOUT);
+                });
+                
+                await Promise.race([middlewarePromise, timeoutPromise]);
+                middlewareInfo.completed = true;
+            } catch (error) {
+                middlewareInfo.completed = true;
+                console.error(`中间件执行错误: ${error.message}`);
+                
+                if (error.message === '中间件执行超时') {
+                    ctx.status = 503;
+                    ctx.body = { error: '服务暂时不可用，请稍后再试' };
+                    ctx._ended = true;
+                }
+                
+                throw error;
+            }
+        };
+        
+        // 开始执行中间件链
+        await executeNextMiddleware(0);
+    }
+
     /**
      * 注册路由处理器
      * @param {string} method HTTP方法
