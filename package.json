@@ -1,13 +1,20 @@
 {
   "name": "uwebkoa",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "A high-performance web framework built on uWebSocket.js, wrapped in a Koa-like interface.",
   "author": "fukai <iakuf@163.com>",
   "repository": {
     "type": "git",
     "url": "https://github.com/iakuf/uwebkoa.git"
   },
-  "keywords": ["high-performance","web framework", "koa2", "uwebsockets", "socket.io", "websocket"],
+  "keywords": [
+    "high-performance",
+    "web framework",
+    "koa2",
+    "uwebsockets",
+    "socket.io",
+    "websocket"
+  ],
   "main": "src/uWebKoa.js",
   "type": "module",
   "license": "MIT",
