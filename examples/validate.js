@@ -1,51 +1,117 @@
 import uWebKoa from './uWebKoa.js';
 
-import { validate, validateAll } from "./middlewares/validation.js";
+import { validate } from "./middlewares/validation.js";
 
-import { object, string, array, mixed } from 'yup';
-const querySchema = object({
-    page: string().required('页码参数是必需的').matches(/^\d+$/, '页码必须是数字'),
-    limit: string().required('参数是必需的').matches(/^\d+$/, '每页数量必须是数字')
-});
-const idParams = object({
-    id: string().required('参数是必需的').matches(/^\d+$/, '参数必须是数字')
-});
-// 为 notifyUpdate 创建验证模式
-const notifyUpdateSchema = object({
-    deviceID: array().of(string()).required('设备ID数组是必需的'),
-    userID: string().default('0'),
-    type: mixed().default(1),
-    op: string().default(''),
-    data: mixed()
-});
 
-// 为 noticeQueue 创建验证模式
-const noticeQueueSchema = object({
-    data: object({
-        queueList: mixed().test(
-            'is-valid-queue-list',
-            '队列列表必须是有效的对象且不能为空',
-            (value) => {
-                // 检查是否为对象且不为空
-                return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
+import { validate } from "./middlewares/validation.js";
+
+import setupSocketIO from './routes/socket.js';
+
+
+const path1demo = {
+    type: 'object',
+    required: ['page', 'limit'],
+    properties: {
+        page: {
+            type: 'string',
+            pattern: '^\\d+$',
+            errorMessage: { 
+                pattern: '页码必须是数字',
+                required: '页码参数是必需的'
             }
-        ),
-        deviceID: string().when('queueList', {
-            is: queueList => queueList && Object.values(queueList).some(ranking => ranking === 0),
-            then: string().required('当有排队成功的用户时，设备ID是必需的')
-        }),
-        avgTime: mixed().default(0),
-        freezeTime: mixed().default(0),
-        relayConf: string().when('queueList', {
-            is: queueList => queueList && Object.values(queueList).some(ranking => ranking === 0),
-            then: string().required('当有排队成功的用户时，转发配置是必需的')
-        }),
-        waitingTotalNum: mixed(),
-        encryptCode: string(),
-        signalUrl: string().default('https://signal.everylinks.com')
-    }).required('数据对象是必需的')
-});
+        },
+        limit: {
+            type: 'string',
+            pattern: '^\\d+$',
+            errorMessage: {
+                pattern: '每页数量必须是数字',
+                required: '参数是必需的'
+            }
+        }
+    }
+};
 
+const path2demo = {
+    type: 'object',
+    required: ['id'],
+    properties: {
+        id: {
+            type: 'string',
+            pattern: '^\\d+$',
+            errorMessage: {
+                pattern: '参数必须是数字',
+                required: '参数是必需的'
+            }
+        }
+    }
+};
+
+
+const path3demo = {
+    type: 'object',
+    required: ['deviceID'],
+    properties: {
+        deviceID: {
+            type: 'array',
+            items: { type: 'string' },
+            errorMessage: { required: '设备ID数组是必需的' }
+        },
+        userID: {
+            type: 'string',
+            default: '0'
+        },
+        type: {
+            default: 1
+        },
+        op: {
+            type: 'string',
+            default: ''
+        },
+        data: {}
+    }
+};
+
+
+const path4demo = {
+    type: 'object',
+    required: ['data'],
+    properties: {
+        data: {
+            type: 'object',
+            required: ['queueList'],
+            properties: {
+                queueList: {
+                    type: 'object',
+                    minProperties: 1,
+                    errorMessage: '队必须是有效的对象且不能为空'
+                },
+                deviceID: {
+                    type: 'string'
+                },
+                avgTime: {
+                    default: 0
+                },
+                freezeTime: {
+                    default: 0
+                },
+                relayConf: {
+                    type: 'string'
+                },
+                waitingTotalNum: {},
+                encryptCode: {
+                    type: 'string'
+                },
+                signalUrl: {
+                    type: 'string',
+                    default: ''
+                },
+                playToken: {
+                    type: 'string'
+                }
+            }
+        }
+    }
+};
 // 创建 uWebKoa 实例，直接传入 SSL 配置
 const app = new uWebKoa({
     ssl: process.env.NODE_ENV === "development" ? {
@@ -68,10 +134,16 @@ app.use(errorHandler()); // 先加这个才会有有中间件的错误
 app.use(requestLogger()); // 先加这个才会有日志
 app.use(corsMiddleware());
 
+// 预先初始化所有验证中间件
+const idParamsValidator = validate(path2demo, 'params');
+const notifyUpdateValidator = validate(path3demo, 'body');
+const noticeQueueValidator = validate(path4demo, 'body');
+
+
 // 添加路由处理器
-app.get('/path1/:id', validate(idParams, 'params'), peerStatus);
-app.post('/path2', validate(notifyUpdateSchema, 'body'), notifyUpdate); // 通知服务
-app.post('/path3', validate(noticeQueueSchema, 'body'), noticeQueue); // 排队更新服务
+app.get('/path1/:id', idParamsValidator, path1handler);
+app.post('/path2', notifyUpdateValidator, path2handler); 
+app.post('/path3', noticeQueueValidator, path3handler); 
 
 // 静态文件服务
 // 需要放到其它的路由的后面

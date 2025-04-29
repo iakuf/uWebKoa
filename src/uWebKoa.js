@@ -39,8 +39,37 @@ const getContentType = (filePath) => {
     return contentTypes[extname] || 'application/octet-stream';
 };
 
+// 添加全局错误处理器类
+class ErrorHandler {
+  static handleError(err, ctx) {
+    if (!ctx || ctx._ended || ctx._aborted) return;
+    
+    // 记录错误
+    console.error('请求处理错误:', err);
+    
+    // 设置状态和响应
+    ctx.status = err.status || 500;
+    const errorResponse = {
+      success: false,
+      message: err.message || '服务器内部错误',
+      code: err.code || 'INTERNAL_ERROR'
+    };
+    
+    // 在非生产环境下添加错误堆栈
+    if (process.env.NODE_ENV !== 'production') {
+      errorResponse.error = err.stack;
+    }
+    
+    // 设置响应头和发送响应
+    ctx.set('Content-Type', 'application/json');
+    ctx.body = errorResponse;
+    ctx.send();
+    ctx._ended = true;
+  }
+}
+
 class uWebKoa {
-    constructor(options) {
+    constructor(options = {}) {
         this.middlewares = [];
         this.context = {};
         this.uWebSocketApp = null; // 存储uWebSocket.js的应用实例
@@ -48,11 +77,36 @@ class uWebKoa {
             rootDir: process.cwd(), // 默认使用当前工作目录
             staticDirs: {},         // 静态文件目录映射
             ssl: null,              // SSL 配置
+            // 添加统一的超时配置
+            timeout: {
+                request: 30000,     // 请求总超时(毫秒)
+                middleware: 10000   // 中间件执行超时(毫秒)
+            },
             ...options
         };
+        
+        // 只有在没有禁用默认错误处理的情况下才添加
+        if (options.disableDefaultErrorHandler !== true) {
+            this.useDefaultErrorHandler();
+        }
+        
         // 在构造函数中直接创建 uWebSocket.js 应用实例
         this.uWebSocketApp = this.createApp(this.options.ssl);
     }
+    
+    // 注册默认错误处理中间件
+    useDefaultErrorHandler() {
+        // 添加在最前面，以便最后执行
+        this.middlewares.unshift(async (ctx, next) => {
+            try {
+                await next();
+            } catch (err) {
+                ErrorHandler.handleError(err, ctx);
+            }
+        });
+        return this;
+    }
+
     /**
     * 获取 uWebSocket.js 应用实例
     * @returns {Object} uWebSocket.js 应用实例
@@ -181,52 +235,48 @@ class uWebKoa {
             // 解析JSON请求体，改进的缓冲区管理
             async parseBody() {
                 const contentType = this.request.headers['content-type'];
-                const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB 大小限制
+                const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
                 let totalSize = 0;
+                let buffer = null;
+                let chunks = [];
                 
                 try {
-                    return new Promise((resolve, reject) => {
-                        // 检查是否为 GET 或 HEAD 请求
-                        if (this.request.method === 'GET' || this.request.method === 'HEAD') {
-                            this.request.body = {};
-                            return resolve();
-                        }
-                        
-                        // 已经中止的请求
-                        if (this._aborted) {
-                            this.request.body = {};
-                            return resolve();
-                        }
-
-                        let buffer = null;
-                        let chunks = [];
-                        
+                    // GET/HEAD 请求或已中止请求直接返回
+                    if (this.request.method === 'GET' || this.request.method === 'HEAD' || this._aborted) {
+                        this.request.body = {};
+                        return;
+                    }
+                    
+                    return await new Promise((resolve, reject) => {
+                        // 解析数据
                         this.res.onData((chunk, isLast) => {
-                            // 使用 try-catch 处理任何解析错误
                             try {
-                                // 安全复制数据块
                                 const curChunk = Buffer.from(new Uint8Array(chunk));
                                 totalSize += curChunk.length;
                                 
-                                // 检查请求体大小限制
                                 if (totalSize > MAX_BODY_SIZE) {
                                     this._aborted = true;
+                                    // 清理资源
+                                    buffer = null;
+                                    chunks = [];
                                     return reject(new Error('请求体过大'));
                                 }
                                 
-                                // 使用数组存储块，避免过早连接
                                 chunks.push(curChunk);
                                 
                                 if (isLast) {
-                                    // 只有在最后才合并所有块
-                                    buffer = Buffer.concat(chunks);
-                                    chunks = null; // 清理临时数组
-                                    
                                     try {
+                                        buffer = Buffer.concat(chunks);
+                                        chunks = []; // 清理临时数组
+                                        
                                         if (contentType && contentType.includes('application/json')) {
-                                            this.request.body = JSON.parse(buffer.toString());
+                                            try {
+                                                this.request.body = JSON.parse(buffer.toString());
+                                            } catch (e) {
+                                                console.error('JSON解析错误:', e);
+                                                this.request.body = buffer.toString();
+                                            }
                                         } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
-                                            // 添加对 URL 编码表单的支持
                                             this.request.body = {};
                                             const formData = buffer.toString();
                                             const pairs = formData.split('&');
@@ -239,34 +289,40 @@ class uWebKoa {
                                         } else {
                                             this.request.body = buffer.toString();
                                         }
-                                        buffer = null; // 显式释放缓冲区
+                                        
+                                        // 释放资源
+                                        buffer = null;
                                         resolve();
                                     } catch (e) {
-                                        console.error(`解析请求体错误:`, e);
                                         this.request.body = buffer ? buffer.toString() : '';
-                                        buffer = null; // 显式释放缓冲区
+                                        buffer = null;
                                         resolve();
                                     }
                                 }
                             } catch (error) {
+                                // 确保清理资源
                                 buffer = null;
-                                chunks = null;
+                                chunks = [];
                                 reject(error);
                             }
                         });
-
-                        // 设置更明确的错误处理逻辑
+                        
+                        // 请求中止处理
                         this.res.onAborted(() => {
                             buffer = null;
-                            chunks = null;
+                            chunks = [];
                             this._aborted = true;
-                            resolve(); // 优雅地处理中止情况
+                            this.request.body = {};
+                            resolve();
                         });
                     });
                 } catch (error) {
-                    console.error('解析请求体时发生错误:', error);
+                    // 确保清理资源
+                    buffer = null;
+                    chunks = [];
                     this.request.body = {};
-                    return Promise.resolve(); // 优雅失败，避免未处理的拒绝
+                    // 记录错误但不中断流程
+                    console.error('解析请求体时发生错误:', error);
                 }
             },
             // 设置响应状态码
@@ -323,6 +379,7 @@ class uWebKoa {
                 // 如果已经发送过响应，则不再发送
                 if (this._ended || this._aborted) return false;
 
+                let fd = null;
                 try {
                     // 检查文件是否存在
                     if (filePath.startsWith('/')) {
@@ -331,76 +388,59 @@ class uWebKoa {
                     }
 
                     const fullPath = path.resolve(this.options?.rootDir || process.cwd(), filePath);
-                    // console.log(`进入进行检查 filePath: ${fullPath}, rootDir: ${this.options?.rootDir}`);
-
 
                     const stat = await fs.promises.stat(fullPath);
                     if (!stat.isFile()) {
-                        // 不是文件，返回 404
-                        // console.log(`文件不存在: ${fullPath}`);
                         this.status = 404;
                         this.body = '<h1>404 Not Found</h1><p>Invalid path.</p>';
-                        this.send(); // 直接在这里发送响应
-                        this._ended = true; // 防止 handleRequest 再次执行
+                        this.send();
+                        this._ended = true;
                         return false;
                     }
-                    // console.log(`文件存在: ${fullPath} 文件大小 ${stat.size}`);
-                    // 对于小文件（小于 1MB），直接读取并使用 ctx.send() 发送
+                    
+                    // 对于小文件，直接读取发送
                     const MAX_SMALL_FILE_SIZE = 1024 * 1024; // 1MB
                     if (stat.size <= MAX_SMALL_FILE_SIZE) {
-                        // 读取文件内容
                         const fileContent = await fs.promises.readFile(fullPath);
-
-                        // 设置响应头和状态码
-                        // console.log(`文件存在小于 1M  ${stat.size}`, fileContent);
-                        // 使用 cork 方法直接发送，避免使用 this.body 。不然会和默认的 ->send() 冲突
                         this.res.cork(() => {
                             this.res.writeStatus('200 OK');
                             this.res.writeHeader('Content-Type', getContentType(fullPath));
                             this.res.writeHeader('Content-Length', stat.size.toString());
                             this.res.end(fileContent);
                         });
-                        this._ended = true; // 这需要手动标记
+                        this._ended = true;
                         return true;
                     }
 
-
-                    // 打开文件
-                    const fd = await fsOpen(fullPath, 'r');
-
-                    // 设置缓冲区大小
+                    // 大文件处理
+                    fd = await fsOpen(fullPath, 'r');
                     const BUFFER_SIZE = 64 * 1024; // 64KB
                     const buffer = Buffer.alloc(BUFFER_SIZE);
 
-                    // 中断处理器， 之所以这个地方还注册，是因为需要它来关句柄。
+                    // 中断处理器
                     this.res.onAborted(() => {
                         this._aborted = true;
-                        console.log(`客户端中断了文件传输: ${fullPath}`);
-                        fsClose(fd).catch(err => console.error('关闭文件失败:', err));
+                        if (fd !== null) {
+                            fsClose(fd).catch(err => console.error('关闭文件失败:', err));
+                            fd = null;
+                        }
                     });
 
-                    // 对于大文件，使用流式传输
-                    // console.log(`发送文件: ${fullPath}, 大小: ${stat.size} 字节, 类型: ${getContentType(fullPath)}`);
+                    // 响应头部
                     this.res.cork(() => {
                         this.res.writeStatus('200 OK');
                         this.res.writeHeader('Content-Type', getContentType(fullPath));
                         this.res.writeHeader('Content-Length', stat.size.toString());
                     });
 
-
-                    // 流式发送文件
-                    let bytesRead = 0;
+                    // 流式发送
                     let position = 0;
                     let totalSent = 0;
 
-                    while (position < stat.size) {
-                        if (this._aborted) break; 
-
-                        bytesRead = fs.readSync(fd, buffer, 0, BUFFER_SIZE, position);
-
+                    while (position < stat.size && !this._aborted) {
+                        const bytesRead = fs.readSync(fd, buffer, 0, BUFFER_SIZE, position);
                         if (bytesRead === 0) break;
 
-                        // 使用 cork 优化写入性能
                         const chunk = buffer.slice(0, bytesRead);
                         this.res.cork(() => {
                             this.res.write(chunk);
@@ -410,31 +450,36 @@ class uWebKoa {
                         totalSent += bytesRead;
                     }
 
-                    // 关闭文件
-                    await fsClose(fd);
+                    // 确保关闭文件
+                    if (fd !== null) {
+                        await fsClose(fd);
+                        fd = null;
+                    }
 
-                    // 如果没有中止，结束响应
+                    // 完成响应
                     if (!this._aborted) {
                         this.res.cork(() => {
                             this.res.end();
                         });
-                        if (this._ended) {  // <-- 新增保护逻辑
-                            console.warn('响应已结束，跳过后续操作');
-                            return;
-                        }
-                        // console.log(`文件发送完成: ${fullPath}, 总共发送: ${totalSent} 字节`);
+                        this._ended = true;
                     }
-                    this._ended = true;
                     return !this._aborted;
                 } catch (err) {
-                    // console.error(`发送文件错误 (${filePath}):`, err);
-                    // 添加连接状态检查
+                    // 确保关闭文件
+                    if (fd !== null) {
+                        try {
+                            await fsClose(fd);
+                        } catch (closeErr) {
+                            console.error('关闭文件失败:', closeErr);
+                        }
+                        fd = null;
+                    }
+
                     if (this._aborted || this._ended) {
-                        console.log('连接已中断，跳过错误处理');
                         return false;
                     }
 
-                    // 如果文件不存在
+                    // 错误处理
                     if (err.code === 'ENOENT') {
                         this.status = 404;
                         this.set('Content-Type', 'text/html');
@@ -546,21 +591,17 @@ class uWebKoa {
      * @param {Object} req uWebSockets请求对象
      */
     async handleRequest(res, req) {
-        // 创建上下文
         const ctx = this.createContext(res, req);
         
-        // 请求超时机制
+        // 使用配置的请求超时时间
+        const REQUEST_TIMEOUT = this.options.timeout.request;
         let timeoutId = null;
-        const REQUEST_TIMEOUT = 30000; // 30秒超时
         
         // 设置请求超时
         timeoutId = setTimeout(() => {
             if (!ctx._ended && !ctx._aborted) {
                 ctx._aborted = true;
-                console.log('请求超时，自动终止');
-                
                 try {
-                    // 发送超时响应
                     res.cork(() => {
                         res.writeStatus('408 Request Timeout');
                         res.writeHeader('Content-Type', 'application/json');
@@ -571,66 +612,36 @@ class uWebKoa {
                 }
             }
         }, REQUEST_TIMEOUT);
-
-        // 在解析请求体之前绑定中断事件
+        
+        // 中断事件处理
         res.onAborted(() => {
             ctx._aborted = true;
-            clearTimeout(timeoutId); // 清除超时定时器
-            console.log('客户端提前中断连接');
+            clearTimeout(timeoutId);
         });
-
+        
         try {
             // 解析请求体
             await ctx.parseBody().catch(err => {
-                console.error('解析请求体错误:', err);
-                ctx.request.body = {}; // 设置默认值
+                ErrorHandler.handleError(err, ctx);
             });
-
-            // 执行中间件链 - 实现超时机制
-            await this.executeMiddleware(ctx).catch(err => {
-                console.error('执行中间件错误:', err);
-                if (!ctx._ended && !ctx._aborted) {
-                    // 使用err.status或默认为500
-                    ctx.status = err.status || 500;
-                    ctx.body = { error: err.message || '内部服务器错误' };
-                }
-            });
-
-            // 发送响应
+            
+            // 只有未结束的请求才执行中间件
             if (!ctx._ended && !ctx._aborted) {
-                ctx.send();
+                await this.executeMiddleware(ctx);
+                
+                // 发送响应(如果中间件未发送)
+                if (!ctx._ended && !ctx._aborted) {
+                    ctx.send();
+                }
             }
         } catch (err) {
-            console.error('Request handling error:', err);
-            // 只有在响应尚未发送且连接未中断时才发送错误响应
-            if (!ctx._aborted && !ctx._ended) {
-                try {
-                    // 使用err.status如果存在，否则使用500
-                    ctx.status = err.status || 500;
-                    ctx.body = { error: err.message || 'Internal Server Error' };
-                    ctx.send();
-                } catch (sendError) {
-                    console.error('发送错误响应时出错:', sendError);
-                }
-            }
+            // 使用统一错误处理
+            ErrorHandler.handleError(err, ctx);
         } finally {
-            clearTimeout(timeoutId); // 确保清除超时定时器
+            clearTimeout(timeoutId);
             
-            // 显式清理上下文中的大型对象
-            try {
-                if (ctx.request.body && typeof ctx.request.body === 'object') {
-                    ctx.request.body = null;
-                }
-                if (ctx.response.body && typeof ctx.response.body === 'object' && ctx.response.body.length > 1024) {
-                    ctx.response.body = null;
-                }
-                
-                // 设置 WeakRef，允许垃圾回收
-                ctx.req = null;
-                ctx.res = null;
-            } catch (cleanupError) {
-                console.error('清理上下文时出错:', cleanupError);
-            }
+            // 资源清理
+            this._cleanupContext(ctx);
         }
     }
 
@@ -639,59 +650,59 @@ class uWebKoa {
      * @param {Object} ctx 请求上下文
      */
     async executeMiddleware(ctx) {
-        const MIDDLEWARE_TIMEOUT = 10000; // 中间件执行超时时间 (10秒)
+        // 使用配置的中间件超时时间
+        const MIDDLEWARE_TIMEOUT = this.options.timeout.middleware;
         
         if (this.middlewares.length === 0) return;
         
-        // 创建一个执行计划数组，包含每个中间件的状态
         const middlewareStack = this.middlewares.map(middleware => ({
             middleware,
             executed: false,
             completed: false
         }));
         
-        // 递归执行逻辑转为非递归实现
-        let currentIndex = 0;
-        
         const executeNextMiddleware = async (index) => {
             if (index >= this.middlewares.length) return;
             
             const middlewareInfo = middlewareStack[index];
-            if (middlewareInfo.executed) return; // 已经执行过的跳过
+            if (middlewareInfo.executed) return;
             
             middlewareInfo.executed = true;
             
             try {
-                // 创建 next 函数，模拟递归行为
+                // 创建 next 函数
                 const next = async () => {
-                    // 执行下一个中间件
                     await executeNextMiddleware(index + 1);
                 };
                 
-                // 设置中间件执行超时
+                // 带超时的中间件执行
                 const middlewarePromise = this.middlewares[index](ctx, next);
                 const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('中间件执行超时')), MIDDLEWARE_TIMEOUT);
+                    const timerId = setTimeout(() => {
+                        clearTimeout(timerId);
+                        reject(new Error('中间件执行超时'));
+                    }, MIDDLEWARE_TIMEOUT);
                 });
                 
                 await Promise.race([middlewarePromise, timeoutPromise]);
                 middlewareInfo.completed = true;
             } catch (error) {
                 middlewareInfo.completed = true;
-                console.error(`中间件执行错误: ${error.message}`);
                 
+                // 超时错误特殊处理
                 if (error.message === '中间件执行超时') {
                     ctx.status = 503;
                     ctx.body = { error: '服务暂时不可用，请稍后再试' };
+                    ctx.send();
                     ctx._ended = true;
                 } else {
-                    // 这里是关键修改：向上传播错误，而不是捕获后不处理
+                    // 其他错误向上传播
                     throw error;
                 }
             }
         };
         
-        // 开始执行中间件链
+        // 执行中间件链
         await executeNextMiddleware(0);
     }
 
@@ -708,40 +719,26 @@ class uWebKoa {
                     this.matchPattern(ctx.request.url, pattern)) {
 
                     ctx.parseParams(pattern);
-
+                    
                     // 创建中间件链
                     let index = 0;
                     const routeNext = async () => {
-                        try {
-                            if (index >= handlers.length) {
-                                await next();
-                                return;
-                            }
-                            const handler = handlers[index++];
-                            await handler(ctx, routeNext);
-                        } catch (error) {
-                            console.error(`路由处理器错误:`, error);
-                            if (!ctx._ended && !ctx._aborted) {
-                                // 使用错误的status属性或默认为500
-                                ctx.status = error.status || 500;
-                                ctx.body = { error: error.message || '内部服务器错误' };
-                                ctx.send();
-                            }
+                        if (index >= handlers.length) {
+                            await next();
+                            return;
                         }
+                        const handler = handlers[index++];
+                        await handler(ctx, routeNext);
                     };
-
+                    
+                    // 执行路由处理器但不捕获错误，让全局错误处理器处理
                     await routeNext();
                 } else {
                     await next();
                 }
             } catch (error) {
-                console.error(`路由匹配错误:`, error);
-                if (!ctx._ended && !ctx._aborted) {
-                    // 使用错误的status属性或默认为500
-                    ctx.status = error.status || 500;
-                    ctx.body = { error: error.message || '内部服务器错误' };
-                    ctx.send();
-                }
+                // 向上传播错误，让全局错误处理器处理
+                throw error;
             }
         };
     }
@@ -838,21 +835,36 @@ class uWebKoa {
     * @param {number} options.workers 工作进程数量，默认为CPU核心数
     * @returns {Promise<any>} 启动结果
     */
-    async listen(port, options = {}) {
+    async listen(portOrApp, optionsOrPort = {}) {
+        // 检测参数类型
+        let port, options;
+        
+        // 如果第一个参数是对象（可能是App实例），第二个参数是数字
+        if (typeof portOrApp === 'object' && (typeof optionsOrPort === 'number' || !isNaN(Number(optionsOrPort)))) {
+            port = Number(optionsOrPort);
+            options = {};
+        } else {
+            port = typeof portOrApp === 'number' ? portOrApp : parseInt(portOrApp, 10);
+            options = optionsOrPort;
+        }
+        
+        if (isNaN(port)) {
+            throw new Error('端口号必须是有效的数字');
+        }
+        
         const defaultOptions = {
             cluster: false,
             threads: false,
-            workers: 0, // 0表示使用所有可用CPU核心
+            workers: 0,
         };
 
         const opts = { ...defaultOptions, ...options };
-
-        // 使用已创建的app实例或创建新的
         const app = this.uWebSocketApp;
-
-        // 将中间件应用到 uWebSockets.js 应用
+        
+        // 应用中间件
         this.applyToApp(app);
-
+        
+        // 根据选项决定使用哪种监听方式
         if (opts.threads) {
             return this._threadListen(app, port, opts);
         } else if (opts.cluster) {
@@ -974,18 +986,21 @@ class uWebKoa {
         const clusterModule = await import('cluster');
         const cluster = clusterModule.default;
         const { cpus } = await import('os');
-
+        
         const numCPUs = options.workers > 0 ? options.workers : cpus().length;
-
+        
         if (cluster.isPrimary) {
             console.log(`主进程 ${process.pid} 正在运行`);
-            console.log(`启动 ${numCPUs} 个工作进程...`);
-
-            // 为每个 CPU 创建一个工作进程
+            
+            // 创建共享数据存储
+            const sharedState = new Map();
+            
+            // 为每个 CPU 创建工作进程
             for (let i = 0; i < numCPUs; i++) {
                 cluster.fork();
             }
-
+            
+            // 处理工作进程退出
             cluster.on('exit', (worker, code, signal) => {
                 console.log(`工作进程 ${worker.process.pid} 已退出，退出码: ${code}`);
                 if (code !== 0 && !worker.exitedAfterDisconnect) {
@@ -993,14 +1008,49 @@ class uWebKoa {
                     cluster.fork();
                 }
             });
-            // 监听错误事件
-            cluster.on('error', (error) => {
-                console.error('Cluster error:', error);
+            
+            // 进程间通信
+            cluster.on('message', (worker, message) => {
+                if (message.type === 'SET_SHARED') {
+                    sharedState.set(message.key, message.value);
+                    // 广播给所有工作进程
+                    for (const id in cluster.workers) {
+                        if (cluster.workers[id] !== worker) {
+                            cluster.workers[id].send({ 
+                                type: 'SHARED_UPDATE', 
+                                key: message.key, 
+                                value: message.value 
+                            });
+                        }
+                    }
+                }
             });
-
+            
+            // 错误处理
+            cluster.on('error', (error) => {
+                console.error('集群错误:', error);
+            });
+            
             return Promise.resolve({ isMaster: true, workers: numCPUs });
         } else {
             // 工作进程代码
+            // 添加进程间通信支持
+            process.on('message', (message) => {
+                if (message.type === 'SHARED_UPDATE') {
+                    // 更新本地共享状态
+                    this.context.shared = this.context.shared || {};
+                    this.context.shared[message.key] = message.value;
+                }
+            });
+            
+            // 添加共享状态方法
+            this.context.setShared = (key, value) => {
+                this.context.shared = this.context.shared || {};
+                this.context.shared[key] = value;
+                process.send({ type: 'SET_SHARED', key, value });
+            };
+            
+            // 监听端口
             return new Promise((resolve) => {
                 const listenSocket = app.listen(port, (token) => {
                     if (token) {
@@ -1027,8 +1077,25 @@ class uWebKoa {
         return app; // 返回 app 实例以支持链式调用
     }
 
-
-
+    // 添加专门的上下文清理方法
+    _cleanupContext(ctx) {
+        try {
+            // 清理大型对象
+            if (ctx.request?.body && typeof ctx.request.body === 'object') {
+                ctx.request.body = null;
+            }
+            if (ctx.response?.body && typeof ctx.response.body === 'object' && 
+                ctx.response.body.length > 1024) {
+                ctx.response.body = null;
+            }
+            
+            // 允许垃圾回收
+            ctx.req = null;
+            ctx.res = null;
+        } catch (cleanupError) {
+            console.error('清理上下文时出错:', cleanupError);
+        }
+    }
 }
 
 export default uWebKoa;

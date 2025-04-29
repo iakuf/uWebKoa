@@ -1,19 +1,32 @@
-import { object } from 'yup';
+import Ajv from 'ajv';
+import ajvErrors from 'ajv-errors';
+
+// 创建并配置 AJV 实例
+const ajv = new Ajv({
+    allErrors: true,       // 返回所有错误而不是第一个
+    useDefaults: true,     // 使用模式中的默认值
+    removeAdditional: true // 删除未在模式中定义的属性
+});
+
+// 添加自定义错误消息支持
+ajvErrors(ajv);
+
+// 缓存已编译的验证器以提高性能
+const validatorCache = new Map();
 
 /**
  * 创建验证中间件
- * @param {Object} schema Yup验证模式对象
+ * @param {Object} schema JSON Schema验证模式对象
  * @param {string} source 验证数据来源 ('body', 'query', 'params')
- * @param {Object} options 验证选项
  * @returns {Function} 验证中间件函数
  */
-export function validate(schema, source = 'body', options = {}) {
-    const defaultOptions = {
-        abortEarly: false, // 返回所有错误而不是在第一个错误时停止
-        stripUnknown: true // 删除未在模式中定义的键
-    };
-
-    const validationOptions = { ...defaultOptions, ...options };
+export function validate(schema, source = 'body') {
+    // 从缓存获取或创建验证器
+    const cacheKey = JSON.stringify(schema);
+    if (!validatorCache.has(cacheKey)) {
+        validatorCache.set(cacheKey, ajv.compile(schema));
+    }
+    const validator = validatorCache.get(cacheKey);
 
     return async (ctx, next) => {
         try {
@@ -21,43 +34,60 @@ export function validate(schema, source = 'body', options = {}) {
             let data;
             switch (source) {
                 case 'body':
-                    data = ctx.request.body;
+                    data = ctx.request.body || {};
                     break;
                 case 'query':
-                    data = ctx.request.query;
+                    data = ctx.request.query || {};
                     break;
                 case 'params':
-                    data = ctx.request.params;
+                    data = ctx.request.params || {};
                     break;
                 default:
                     throw new Error(`不支持的验证来源: ${source}`);
             }
+
             // 验证数据
-            const validData = await schema.validate(data, validationOptions);
+            const valid = validator(data);
+
+            if (!valid) {
+                // 格式化错误消息
+                const errors = validator.errors.map(err => {
+                    if (err.message) return err.message;
+                    return `${err.dataPath} ${err.message}`;
+                });
+
+                ctx.status = 400;
+                ctx.json({
+                    success: false,
+                    code: 'VALIDATION_ERROR',
+                    message: '请求参数验证失败',
+                    errors: errors
+                });
+                return;
+            }
 
             // 将验证后的数据放回请求对象
             switch (source) {
                 case 'body':
-                    ctx.request.body = validData;
+                    ctx.request.body = data;
                     break;
                 case 'query':
-                    ctx.request.query = validData;
+                    ctx.request.query = data;
                     break;
                 case 'params':
-                    ctx.request.params = validData;
+                    ctx.request.params = data;
                     break;
             }
 
             await next();
         } catch (err) {
-            console.error(`验证错误详情:`, err.errors || err.message);
-            // 处理验证错误
-            ctx.status = 400;
+            // 处理验证器内部错误
+            ctx.status = 500;
             ctx.json({
                 success: false,
                 code: 'VALIDATION_ERROR',
-                message: '请求参数验证失败',
-                errors: err.errors || [err.message]
+                message: '验证过程中发生错误',
+                errors: [err.message]
             });
         }
     };

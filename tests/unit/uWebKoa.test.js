@@ -65,7 +65,7 @@ describe('uWebKoa', () => {
   let mockRes;
 
   beforeEach(() => {
-    app = new uWebKoa();
+    app = new uWebKoa({ disableDefaultErrorHandler: true });
     mockReq = createMockReq();
     mockRes = createMockRes();
     vi.clearAllMocks();
