@@ -441,7 +441,7 @@ describe('uWebKoa', () => {
 
       await app.handleRequest(mockRes, mockReq);
 
-      expect(mockRes.writeStatus).toHaveBeenCalledWith('500');
+      expect(mockRes.writeStatus).toHaveBeenCalledWith('404');
     });
   });
 

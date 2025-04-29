@@ -184,84 +184,90 @@ class uWebKoa {
                 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB 大小限制
                 let totalSize = 0;
                 
-                return new Promise((resolve, reject) => {
-                    // 检查是否为 GET 或 HEAD 请求，这些请求通常没有请求体
-                    if (this.request.method === 'GET' || this.request.method === 'HEAD') {
-                        this.request.body = {};
-                        return resolve();
-                    }
-                    
-                    // 已经中止的请求
-                    if (this._aborted) {
-                        this.request.body = {};
-                        return resolve();
-                    }
+                try {
+                    return new Promise((resolve, reject) => {
+                        // 检查是否为 GET 或 HEAD 请求
+                        if (this.request.method === 'GET' || this.request.method === 'HEAD') {
+                            this.request.body = {};
+                            return resolve();
+                        }
+                        
+                        // 已经中止的请求
+                        if (this._aborted) {
+                            this.request.body = {};
+                            return resolve();
+                        }
 
-                    let buffer = null;
-                    let chunks = [];
-                    
-                    this.res.onData((chunk, isLast) => {
-                        // 使用 try-catch 处理任何解析错误
-                        try {
-                            // 安全复制数据块
-                            const curChunk = Buffer.from(new Uint8Array(chunk));
-                            totalSize += curChunk.length;
-                            
-                            // 检查请求体大小限制
-                            if (totalSize > MAX_BODY_SIZE) {
-                                this._aborted = true;
-                                return reject(new Error('请求体过大'));
-                            }
-                            
-                            // 使用数组存储块，避免过早连接
-                            chunks.push(curChunk);
-                            
-                            if (isLast) {
-                                // 只有在最后才合并所有块
-                                buffer = Buffer.concat(chunks);
-                                chunks = null; // 清理临时数组
+                        let buffer = null;
+                        let chunks = [];
+                        
+                        this.res.onData((chunk, isLast) => {
+                            // 使用 try-catch 处理任何解析错误
+                            try {
+                                // 安全复制数据块
+                                const curChunk = Buffer.from(new Uint8Array(chunk));
+                                totalSize += curChunk.length;
                                 
-                                try {
-                                    if (contentType && contentType.includes('application/json')) {
-                                        this.request.body = JSON.parse(buffer.toString());
-                                    } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
-                                        // 添加对 URL 编码表单的支持
-                                        this.request.body = {};
-                                        const formData = buffer.toString();
-                                        const pairs = formData.split('&');
-                                        pairs.forEach(pair => {
-                                            const [key, value] = pair.split('=');
-                                            if (key) {
-                                                this.request.body[decodeURIComponent(key)] = decodeURIComponent(value || '');
-                                            }
-                                        });
-                                    } else {
-                                        this.request.body = buffer.toString();
-                                    }
-                                    buffer = null; // 显式释放缓冲区
-                                    resolve();
-                                } catch (e) {
-                                    console.error(`解析请求体错误:`, e);
-                                    this.request.body = buffer ? buffer.toString() : '';
-                                    buffer = null; // 显式释放缓冲区
-                                    resolve();
+                                // 检查请求体大小限制
+                                if (totalSize > MAX_BODY_SIZE) {
+                                    this._aborted = true;
+                                    return reject(new Error('请求体过大'));
                                 }
+                                
+                                // 使用数组存储块，避免过早连接
+                                chunks.push(curChunk);
+                                
+                                if (isLast) {
+                                    // 只有在最后才合并所有块
+                                    buffer = Buffer.concat(chunks);
+                                    chunks = null; // 清理临时数组
+                                    
+                                    try {
+                                        if (contentType && contentType.includes('application/json')) {
+                                            this.request.body = JSON.parse(buffer.toString());
+                                        } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
+                                            // 添加对 URL 编码表单的支持
+                                            this.request.body = {};
+                                            const formData = buffer.toString();
+                                            const pairs = formData.split('&');
+                                            pairs.forEach(pair => {
+                                                const [key, value] = pair.split('=');
+                                                if (key) {
+                                                    this.request.body[decodeURIComponent(key)] = decodeURIComponent(value || '');
+                                                }
+                                            });
+                                        } else {
+                                            this.request.body = buffer.toString();
+                                        }
+                                        buffer = null; // 显式释放缓冲区
+                                        resolve();
+                                    } catch (e) {
+                                        console.error(`解析请求体错误:`, e);
+                                        this.request.body = buffer ? buffer.toString() : '';
+                                        buffer = null; // 显式释放缓冲区
+                                        resolve();
+                                    }
+                                }
+                            } catch (error) {
+                                buffer = null;
+                                chunks = null;
+                                reject(error);
                             }
-                        } catch (error) {
+                        });
+
+                        // 设置更明确的错误处理逻辑
+                        this.res.onAborted(() => {
                             buffer = null;
                             chunks = null;
-                            reject(error);
-                        }
+                            this._aborted = true;
+                            resolve(); // 优雅地处理中止情况
+                        });
                     });
-
-                    // 设置更明确的错误处理逻辑
-                    this.res.onAborted(() => {
-                        buffer = null;
-                        chunks = null;
-                        this._aborted = true;
-                        resolve(); // 优雅地处理中止情况
-                    });
-                });
+                } catch (error) {
+                    console.error('解析请求体时发生错误:', error);
+                    this.request.body = {};
+                    return Promise.resolve(); // 优雅失败，避免未处理的拒绝
+                }
             },
             // 设置响应状态码
             setStatus(code) {
@@ -553,12 +559,16 @@ class uWebKoa {
                 ctx._aborted = true;
                 console.log('请求超时，自动终止');
                 
-                // 发送超时响应
-                res.cork(() => {
-                    res.writeStatus('408 Request Timeout');
-                    res.writeHeader('Content-Type', 'application/json');
-                    res.end(JSON.stringify({ error: '请求超时' }));
-                });
+                try {
+                    // 发送超时响应
+                    res.cork(() => {
+                        res.writeStatus('408 Request Timeout');
+                        res.writeHeader('Content-Type', 'application/json');
+                        res.end(JSON.stringify({ error: '请求超时' }));
+                    });
+                } catch (error) {
+                    console.error('发送超时响应时出错:', error);
+                }
             }
         }, REQUEST_TIMEOUT);
 
@@ -571,10 +581,20 @@ class uWebKoa {
 
         try {
             // 解析请求体
-            await ctx.parseBody();
+            await ctx.parseBody().catch(err => {
+                console.error('解析请求体错误:', err);
+                ctx.request.body = {}; // 设置默认值
+            });
 
             // 执行中间件链 - 实现超时机制
-            await this.executeMiddleware(ctx);
+            await this.executeMiddleware(ctx).catch(err => {
+                console.error('执行中间件错误:', err);
+                if (!ctx._ended && !ctx._aborted) {
+                    // 使用err.status或默认为500
+                    ctx.status = err.status || 500;
+                    ctx.body = { error: err.message || '内部服务器错误' };
+                }
+            });
 
             // 发送响应
             if (!ctx._ended && !ctx._aborted) {
@@ -584,24 +604,33 @@ class uWebKoa {
             console.error('Request handling error:', err);
             // 只有在响应尚未发送且连接未中断时才发送错误响应
             if (!ctx._aborted && !ctx._ended) {
-                ctx.status = 500;
-                ctx.body = { error: 'Internal Server Error' };
-                ctx.send();
+                try {
+                    // 使用err.status如果存在，否则使用500
+                    ctx.status = err.status || 500;
+                    ctx.body = { error: err.message || 'Internal Server Error' };
+                    ctx.send();
+                } catch (sendError) {
+                    console.error('发送错误响应时出错:', sendError);
+                }
             }
         } finally {
             clearTimeout(timeoutId); // 确保清除超时定时器
             
             // 显式清理上下文中的大型对象
-            if (ctx.request.body && typeof ctx.request.body === 'object') {
-                ctx.request.body = null;
+            try {
+                if (ctx.request.body && typeof ctx.request.body === 'object') {
+                    ctx.request.body = null;
+                }
+                if (ctx.response.body && typeof ctx.response.body === 'object' && ctx.response.body.length > 1024) {
+                    ctx.response.body = null;
+                }
+                
+                // 设置 WeakRef，允许垃圾回收
+                ctx.req = null;
+                ctx.res = null;
+            } catch (cleanupError) {
+                console.error('清理上下文时出错:', cleanupError);
             }
-            if (ctx.response.body && typeof ctx.response.body === 'object' && ctx.response.body.length > 1024) {
-                ctx.response.body = null;
-            }
-            
-            // 设置 WeakRef，允许垃圾回收
-            ctx.req = null;
-            ctx.res = null;
         }
     }
 
@@ -655,9 +684,10 @@ class uWebKoa {
                     ctx.status = 503;
                     ctx.body = { error: '服务暂时不可用，请稍后再试' };
                     ctx._ended = true;
+                } else {
+                    // 这里是关键修改：向上传播错误，而不是捕获后不处理
+                    throw error;
                 }
-                
-                throw error;
             }
         };
         
@@ -673,25 +703,45 @@ class uWebKoa {
      */
     route(method, pattern, ...handlers) {
         return async (ctx, next) => {
-            if (ctx.request.method.toLowerCase() === method.toLowerCase() &&
-                this.matchPattern(ctx.request.url, pattern)) {
+            try {
+                if (ctx.request.method.toLowerCase() === method.toLowerCase() &&
+                    this.matchPattern(ctx.request.url, pattern)) {
 
-                ctx.parseParams(pattern); // 解析路径参数
+                    ctx.parseParams(pattern);
 
-                // 创建中间件链
-                let index = 0;
-                const routeNext = async () => {
-                    if (index >= handlers.length) {
-                        await next();
-                        return;
-                    }
-                    const handler = handlers[index++];
-                    await handler(ctx, routeNext);
-                };
+                    // 创建中间件链
+                    let index = 0;
+                    const routeNext = async () => {
+                        try {
+                            if (index >= handlers.length) {
+                                await next();
+                                return;
+                            }
+                            const handler = handlers[index++];
+                            await handler(ctx, routeNext);
+                        } catch (error) {
+                            console.error(`路由处理器错误:`, error);
+                            if (!ctx._ended && !ctx._aborted) {
+                                // 使用错误的status属性或默认为500
+                                ctx.status = error.status || 500;
+                                ctx.body = { error: error.message || '内部服务器错误' };
+                                ctx.send();
+                            }
+                        }
+                    };
 
-                await routeNext();
-            } else {
-                await next();
+                    await routeNext();
+                } else {
+                    await next();
+                }
+            } catch (error) {
+                console.error(`路由匹配错误:`, error);
+                if (!ctx._ended && !ctx._aborted) {
+                    // 使用错误的status属性或默认为500
+                    ctx.status = error.status || 500;
+                    ctx.body = { error: error.message || '内部服务器错误' };
+                    ctx.send();
+                }
             }
         };
     }
