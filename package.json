@@ -1,6 +1,6 @@
 {
   "name": "uwebkoa",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A high-performance web framework built on uWebSocket.js, wrapped in a Koa-like interface.",
   "author": "fukai <iakuf@163.com>",
   "repository": {
