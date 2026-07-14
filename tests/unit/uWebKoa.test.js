@@ -55,6 +55,7 @@ function createMockRes() {
     writeHeader: vi.fn(),
     end: vi.fn(),
     cork: vi.fn((cb) => cb()),
+    getRemoteAddressAsText: () => Buffer.from('203.0.113.7'),
     sendFile: vi.fn()
   };
 }
@@ -558,6 +559,329 @@ describe('uWebKoa', () => {
         success: false,
         error: '页码必须是数字'
       }));
+    });
+  });
+
+  describe('重定向与 assert', () => {
+    it('redirect 应设置 302 与 Location 头', async () => {
+      app.use(ctx => { ctx.redirect('/login'); });
+      await app.handleRequest(mockRes, mockReq);
+      expect(mockRes.writeStatus).toHaveBeenCalledWith('302');
+      expect(mockRes.writeHeader).toHaveBeenCalledWith('Location', '/login');
+      expect(mockRes.end).toHaveBeenCalledWith('Redirecting to /login');
+    });
+
+    it('redirect 支持自定义状态码(301)', async () => {
+      app.use(ctx => { ctx.redirect('/new', 301); });
+      await app.handleRequest(mockRes, mockReq);
+      expect(mockRes.writeStatus).toHaveBeenCalledWith('301');
+    });
+
+    it('assert 条件为假时应以对应状态码返回', async () => {
+      app.use(ctx => { ctx.assert(false, 403, '禁止访问'); });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+      await app.handleRequest(mockRes, mockReq);
+      expect(mockRes.writeStatus).toHaveBeenCalledWith('403');
+      errorSpy.mockRestore();
+    });
+
+    it('assert 条件为真时应继续执行', async () => {
+      app.use(ctx => { ctx.assert(true, 400, '不应触发'); ctx.json({ ok: true }); });
+      await app.handleRequest(mockRes, mockReq);
+      expect(mockRes.writeStatus).toHaveBeenCalledWith('200');
+    });
+  });
+
+  describe('更多路由方法与匹配', () => {
+    it('应该处理 PUT 请求并解析参数', async () => {
+      let id;
+      app.put('/item/:id', ctx => { id = ctx.request.params.id; ctx.json({ m: 'put' }); });
+      const res = createMockRes();
+      await app.handleRequest(res, createMockReq('PUT', '/item/7'));
+      expect(id).toBe('7');
+      expect(res.writeStatus).toHaveBeenCalledWith('200');
+    });
+
+    it('应该处理 DELETE 请求', async () => {
+      let hit = false;
+      app.delete('/item/:id', ctx => { hit = true; ctx.json({ m: 'del' }); });
+      const res = createMockRes();
+      await app.handleRequest(res, createMockReq('DELETE', '/item/9'));
+      expect(hit).toBe(true);
+    });
+
+    it('路径参数应进行 URL 解码', async () => {
+      let name;
+      app.get('/u/:name', ctx => { name = ctx.request.params.name; ctx.json({ ok: true }); });
+      const res = createMockRes();
+      await app.handleRequest(res, createMockReq('GET', '/u/hello%20world'));
+      expect(name).toBe('hello world');
+    });
+
+    it('应该匹配通配符路由', () => {
+      expect(app.matchPattern('/files/a/b.txt', '/files/*')).toBe(true);
+      expect(app.matchPattern('/files', '/files/*')).toBe(true);
+      expect(app.matchPattern('/other', '/files/*')).toBe(false);
+      expect(app.matchPattern('/a/b', '/a/*')).toBe(true);
+    });
+  });
+
+  describe('默认 404', () => {
+    it('未匹配任何路由时应返回 404', async () => {
+      app.get('/exists', ctx => ctx.json({ ok: true }));
+      const res = createMockRes();
+      await app.handleRequest(res, createMockReq('GET', '/nope'));
+      expect(res.writeStatus).toHaveBeenCalledWith('404');
+    });
+
+    it('显式设置状态码时不应被 404 覆盖', async () => {
+      app.use(ctx => { ctx.status = 204; });
+      const res = createMockRes();
+      await app.handleRequest(res, createMockReq('GET', '/'));
+      expect(res.writeStatus).toHaveBeenCalledWith('204');
+    });
+  });
+
+  describe('资源与生命周期', () => {
+    it('每个请求只注册一次 res.onAborted', async () => {
+      app.post('/p', ctx => ctx.json({ ok: true }));
+      let count = 0;
+      const res = createMockRes();
+      res.onAborted = vi.fn(function (cb) { count++; this.abortCb = cb; });
+      await app.handleRequest(res, createMockReq('POST', '/p', { 'content-type': 'application/json' }));
+      expect(count).toBe(1);
+    });
+
+    it('中间件正常完成后不残留超时计时器', async () => {
+      vi.useFakeTimers();
+      try {
+        const a = new uWebKoa({ disableDefaultErrorHandler: true, timeout: { request: 30000, middleware: 5000 } });
+        a.get('/x', ctx => ctx.json({ ok: true }));
+        const res = createMockRes();
+        await a.handleRequest(res, createMockReq('GET', '/x'));
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('中间件执行超时应返回 503(显式配置 timeout.middleware)', async () => {
+      const a = new uWebKoa({ disableDefaultErrorHandler: true, timeout: { request: 30000, middleware: 20 } });
+      a.use(async (ctx, next) => {
+        await new Promise(r => setTimeout(r, 60));
+        ctx.json({ ok: true });
+      });
+      const res = createMockRes();
+      await a.handleRequest(res, createMockReq('GET', '/'));
+      expect(res.writeStatus).toHaveBeenCalledWith('503');
+    });
+
+    it('默认关闭中间件超时：慢中间件不触发 503，也不创建链级计时器', async () => {
+      vi.useFakeTimers();
+      try {
+        // 默认 timeout.middleware = 0 (关闭)
+        const a = new uWebKoa({ disableDefaultErrorHandler: true });
+        a.use(async (ctx) => { ctx.json({ ok: true }); });
+        const res = createMockRes();
+        await a.handleRequest(res, createMockReq('GET', '/'));
+        // 只应有 handleRequest 的请求级计时器，且已在 finally 清除 => 0
+        expect(vi.getTimerCount()).toBe(0);
+        expect(res.writeStatus).toHaveBeenCalledWith('200');
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('请求体处理边界', () => {
+    it('请求体超过 10MB 上限应返回 413', async () => {
+      app.post('/upload', ctx => ctx.json({ ok: true }));
+      const res = createMockRes();
+      res.onData = vi.fn(cb => { cb(Buffer.alloc(10 * 1024 * 1024 + 16), true); });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+      await app.handleRequest(res, createMockReq('POST', '/upload', { 'content-type': 'application/octet-stream' }));
+      expect(res.writeStatus).toHaveBeenCalledWith('413');
+      errorSpy.mockRestore();
+    });
+
+    it('应正确拼接多个数据分片', async () => {
+      let body;
+      app.post('/api', ctx => { body = ctx.request.body; ctx.json({ ok: true }); });
+      const res = createMockRes();
+      res.onData = vi.fn(cb => {
+        cb(Buffer.from('{"a":1,'), false);
+        cb(Buffer.from('"b":2}'), true);
+      });
+      await app.handleRequest(res, createMockReq('POST', '/api', { 'content-type': 'application/json' }));
+      expect(body).toEqual({ a: 1, b: 2 });
+    });
+  });
+
+  describe('SSL', () => {
+    it('提供 SSL 配置时应创建 SSLApp', async () => {
+      const uws = await import('uWebSockets.js');
+      uws.SSLApp.mockClear();
+      const sslApp = new uWebKoa({
+        disableDefaultErrorHandler: true,
+        ssl: { key_file_name: 'k', cert_file_name: 'c' }
+      });
+      expect(uws.SSLApp).toHaveBeenCalledTimes(1);
+      expect(sslApp.getUWebSocketApp()).toBeDefined();
+    });
+  });
+
+  describe('sendFile 文件发送', () => {
+    it('应发送小文件(<=1MB)', async () => {
+      const { tmpdir } = await import('os');
+      const fsMod = await import('fs');
+      const pathMod = await import('path');
+      const tmp = pathMod.join(tmpdir(), `uwebkoa-small-${Date.now()}.txt`);
+      fsMod.writeFileSync(tmp, 'hello small file');
+      try {
+        const res = createMockRes();
+        const ctx = app.createContext(res, createMockReq('GET', '/'));
+        const ok = await ctx.sendFile(tmp);
+        expect(ok).toBe(true);
+        expect(res.writeStatus).toHaveBeenCalledWith('200 OK');
+        expect(res.writeHeader).toHaveBeenCalledWith('Content-Type', 'text/plain');
+        const sent = res.end.mock.calls[0][0];
+        expect(Buffer.from(sent).toString()).toBe('hello small file');
+      } finally {
+        fsMod.unlinkSync(tmp);
+      }
+    });
+
+    it('应流式发送大文件并处理背压', async () => {
+      const { tmpdir } = await import('os');
+      const fsMod = await import('fs');
+      const pathMod = await import('path');
+      const size = 1.5 * 1024 * 1024; // 1.5MB，超过 1MB 小文件阈值
+      const content = Buffer.alloc(size, 0x61);
+      const tmp = pathMod.join(tmpdir(), `uwebkoa-large-${Date.now()}.bin`);
+      fsMod.writeFileSync(tmp, content);
+      try {
+        // 模拟 uWebSockets.js 的背压语义：首次 tryEnd 制造一次背压，随后经 onWritable 排空
+        const received = [];
+        let confirmed = 0;
+        let writableCb = null;
+        let backpressureUsed = false;
+        const res = {
+          onAborted(cb) { this.abortCb = cb; },
+          cork(cb) { cb(); },
+          writeStatus: vi.fn(),
+          writeHeader: vi.fn(),
+          end: vi.fn(),
+          onWritable(cb) { writableCb = cb; return this; },
+          tryEnd(chunk, totalSize) {
+            if (!backpressureUsed) {
+              backpressureUsed = true;
+              queueMicrotask(() => {
+                const cb = writableCb; writableCb = null;
+                if (cb) cb(confirmed);
+              });
+              return [false, false];
+            }
+            received.push(Buffer.from(chunk));
+            confirmed += chunk.length;
+            return [true, confirmed >= totalSize];
+          }
+        };
+        const ctx = app.createContext(res, createMockReq('GET', '/'));
+        const ok = await ctx.sendFile(tmp);
+        expect(ok).toBe(true);
+        expect(res.writeStatus).toHaveBeenCalledWith('200 OK');
+        expect(backpressureUsed).toBe(true);
+        const assembled = Buffer.concat(received);
+        expect(assembled.length).toBe(size);
+        expect(assembled.equals(content)).toBe(true);
+      } finally {
+        fsMod.unlinkSync(tmp);
+      }
+    });
+
+    it('文件不存在时应返回 404', async () => {
+      const res = createMockRes();
+      const ctx = app.createContext(res, createMockReq('GET', '/'));
+      const ok = await ctx.sendFile('this/file/does/not/exist-xyz.txt');
+      expect(ok).toBe(false);
+      expect(res.writeStatus).toHaveBeenCalledWith('404');
+    });
+  });
+
+  describe('Koa 兼容功能 (cookies / ip / 自动 Content-Type)', () => {
+    it('ctx.ip 返回客户端地址', () => {
+      const ctx = app.createContext(createMockRes(), createMockReq('GET', '/'));
+      expect(ctx.ip).toBe('203.0.113.7');
+    });
+
+    it('ctx.get 读取请求头(不区分大小写)', () => {
+      const ctx = app.createContext(createMockRes(), createMockReq('GET', '/', { 'x-custom': 'yes' }));
+      expect(ctx.get('X-Custom')).toBe('yes');
+    });
+
+    it('ctx.cookies.get 解析 Cookie 头', () => {
+      const req = createMockReq('GET', '/', { cookie: 'sid=abc123; theme=dark' });
+      const ctx = app.createContext(createMockRes(), req);
+      expect(ctx.cookies.get('sid')).toBe('abc123');
+      expect(ctx.cookies.get('theme')).toBe('dark');
+      expect(ctx.cookies.get('nope')).toBeUndefined();
+    });
+
+    it('ctx.cookies.set 支持多个 Set-Cookie 并逐个写出', async () => {
+      const res = createMockRes();
+      app.use((ctx) => {
+        ctx.cookies.set('a', '1', { path: '/' });
+        ctx.cookies.set('b', '2', { httpOnly: false, sameSite: 'Lax' });
+        ctx.json({ ok: true });
+      });
+      await app.handleRequest(res, createMockReq('GET', '/'));
+      const setCookieCalls = res.writeHeader.mock.calls.filter((c) => c[0] === 'Set-Cookie');
+      expect(setCookieCalls.length).toBe(2);
+      expect(setCookieCalls[0][1]).toContain('a=1');
+      expect(setCookieCalls[0][1]).toContain('HttpOnly'); // 默认 HttpOnly
+      expect(setCookieCalls[1][1]).toContain('b=2');
+      expect(setCookieCalls[1][1]).toContain('SameSite=Lax');
+      expect(setCookieCalls[1][1]).not.toContain('HttpOnly'); // httpOnly:false 关闭
+    });
+
+    it('对象 body 自动推断为 application/json', async () => {
+      const res = createMockRes();
+      app.use((ctx) => { ctx.body = { a: 1 }; });
+      await app.handleRequest(res, createMockReq('GET', '/'));
+      expect(res.writeHeader).toHaveBeenCalledWith('Content-Type', 'application/json');
+    });
+
+    it('字符串 body：< 开头 -> text/html，否则 text/plain', async () => {
+      const r1 = createMockRes();
+      const a1 = new uWebKoa({ disableDefaultErrorHandler: true });
+      a1.use((ctx) => { ctx.body = '<h1>hi</h1>'; });
+      await a1.handleRequest(r1, createMockReq('GET', '/'));
+      expect(r1.writeHeader).toHaveBeenCalledWith('Content-Type', 'text/html');
+
+      const r2 = createMockRes();
+      const a2 = new uWebKoa({ disableDefaultErrorHandler: true });
+      a2.use((ctx) => { ctx.body = 'plain'; });
+      await a2.handleRequest(r2, createMockReq('GET', '/'));
+      expect(r2.writeHeader).toHaveBeenCalledWith('Content-Type', 'text/plain');
+    });
+
+    it('Buffer body 原样发送并推断为 application/octet-stream', async () => {
+      const res = createMockRes();
+      const payload = Buffer.from('binary-data');
+      app.use((ctx) => { ctx.body = payload; });
+      await app.handleRequest(res, createMockReq('GET', '/'));
+      expect(res.writeHeader).toHaveBeenCalledWith('Content-Type', 'application/octet-stream');
+      expect(res.end).toHaveBeenCalledWith(payload);
+    });
+
+    it('显式设置 Content-Type 时不被自动推断覆盖', async () => {
+      const res = createMockRes();
+      app.use((ctx) => { ctx.set('Content-Type', 'application/xml'); ctx.body = '<x/>'; });
+      await app.handleRequest(res, createMockReq('GET', '/'));
+      expect(res.writeHeader).toHaveBeenCalledWith('Content-Type', 'application/xml');
+      expect(res.writeHeader).not.toHaveBeenCalledWith('Content-Type', 'text/html');
     });
   });
 });

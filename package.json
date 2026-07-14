@@ -1,6 +1,6 @@
 {
   "name": "uwebkoa",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "description": "A high-performance web framework built on uWebSocket.js, wrapped in a Koa-like interface.",
   "author": "fukai <iakuf@163.com>",
   "repository": {
@@ -16,21 +16,31 @@
     "websocket"
   ],
   "main": "src/uWebKoa.js",
+  "types": "types/index.d.ts",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "vitest"
+    "test": "vitest run tests/unit",
+    "test:e2e": "vitest run tests/integration",
+    "test:all": "vitest run",
+    "test:watch": "vitest tests/unit",
+    "bench": "node tests/benchmark/bench.js"
   },
   "dependencies": {
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.51.0"
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
+    "autocannon": "^8.0.0",
+    "typescript": "^7.0.2",
     "vitest": "3.0.8",
-    "@vitejs/plugin-node": "^1.0.0"
+    "ws": "^8.21.0"
   },
   "files": [
     "src/",
+    "types/",
     "README.md",
+    "README.cn.md",
     "LICENSE"
   ]
 }
