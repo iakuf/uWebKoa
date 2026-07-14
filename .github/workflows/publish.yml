@@ -1,0 +1,32 @@
+name: Publish to npm
+
+# 通过 GitHub Release 触发发布，也支持在 Actions 页手动触发
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing (OIDC) 必需，用来向 npm 证明构建来源
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing 需要 npm >= 11.5.1，runner 自带的版本可能偏低
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      # 本包没有构建步骤（main 直接指向 src/uWebKoa.js），发布无需安装依赖
+      - name: Publish
+        run: npm publish
