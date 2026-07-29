@@ -1,29 +1,29 @@
 name: Publish to npm
 
-# 通过 GitHub Release 触发发布，也支持在 Actions 页手动触发
+# 通过 GitHub Release 触发发布
 on:
   release:
     types: [published]
-  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Trusted Publishing (OIDC) 必需，用来向 npm 证明构建来源
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # Trusted Publishing (OIDC) 必需，用来向 npm 证明构建来源
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          # Trusted Publishing 要求 Node >= 22.14.0
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
-      # Trusted Publishing 需要 npm >= 11.5.1，runner 自带的版本可能偏低
+      # Trusted Publishing 要求 npm >= 11.5.1
       - name: Upgrade npm
         run: npm install -g npm@latest
 
