@@ -5,7 +5,7 @@
   "author": "fukai <iakuf@163.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/iakuf/uwebkoa.git"
+    "url": "git+https://github.com/iakuf/uwebkoa.git"
   },
   "keywords": [
     "high-performance",
